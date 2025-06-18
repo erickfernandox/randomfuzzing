@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +53,10 @@ func init() {
 
 func usage() {
 	fmt.Println(`
+ _____ _     _
+|  _  |_|___|_|_ _ ___ ___
+|     | |  _| |_'_|_ -|_ -|
+|__|__|_|_| |_|_,_|___|___|
 
 Usage:
   -lp       List of parameters in txt file
