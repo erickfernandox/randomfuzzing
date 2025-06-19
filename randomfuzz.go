@@ -29,12 +29,13 @@ func (h *customheaders) Set(val string) error {
 
 var (
 	headers     customheaders
-	paramFile  string
-	paramCount int
-	payload    string
-	proxy      string
-	onlyPOC    bool
-	paramList  []string
+	paramFile   string
+	paramCount  int
+	payload     string
+	proxy       string
+	onlyPOC     bool
+	paramList   []string
+	concurrency int
 )
 
 func init() {
@@ -48,15 +49,12 @@ func init() {
 	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output")
 	flag.Var(&headers, "H", "Add headers")
 	flag.Var(&headers, "headers", "Add headers")
+	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
 	flag.Usage = usage
 }
 
 func usage() {
 	fmt.Println(`
- _____ _     _
-|  _  |_|___|_|_ _ ___ ___
-|     | |  _| |_'_|_ -|_ -|
-|__|__|_|_| |_|_,_|___|___|
 
 Usage:
   -lp       List of parameters in txt file
@@ -65,11 +63,16 @@ Usage:
   -proxy    Proxy address
   -H        Headers
   -s        Show only PoC
+  -t        Number of threads (default 50, minimum 15)
   `)
 }
 
 func main() {
 	flag.Parse()
+
+	if concurrency < 15 {
+		concurrency = 15
+	}
 
 	if paramFile != "" {
 		params, err := readParamFile(paramFile)
@@ -83,7 +86,6 @@ func main() {
 	stdin := bufio.NewScanner(os.Stdin)
 	targets := make(chan string)
 	var wg sync.WaitGroup
-	concurrency := 50
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -189,7 +191,7 @@ func testURL(base string) string {
 func buildClient() *http.Client {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		DialContext: (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
+		DialContext:     (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
 	}
 	if proxy != "" {
 		if parsedProxy, err := url.Parse(proxy); err == nil {
