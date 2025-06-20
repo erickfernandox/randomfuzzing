@@ -33,6 +33,7 @@ var (
 	paramCount  int
 	payload     string
 	proxy       string
+	matchStr    string
 	onlyPOC     bool
 	paramList   []string
 	concurrency int
@@ -43,6 +44,8 @@ func init() {
 	flag.StringVar(&paramFile, "lp", "", "Path to parameter list file")
 	flag.StringVar(&payload, "payload", "", "Payload to inject")
 	flag.StringVar(&payload, "p", "", "Payload to inject")
+	flag.StringVar(&matchStr, "match", "", "String to match in response body")
+	flag.StringVar(&matchStr, "m", "", "String to match in response body")
 	flag.StringVar(&proxy, "proxy", "", "Proxy URL")
 	flag.StringVar(&proxy, "x", "", "Proxy URL")
 	flag.BoolVar(&onlyPOC, "only-poc", false, "Show only PoC output")
@@ -55,11 +58,16 @@ func init() {
 
 func usage() {
 	fmt.Println(`
+ _____ _     _
+|  _  |_|___|_|_ _ ___ ___
+|     | |  _| |_'_|_ -|_ -|
+|__|__|_|_| |_|_,_|___|___|
 
 Usage:
   -lp       List of parameters in txt file
   -params   Number of parameters to inject
   -payload  Payload to test
+  -match    String to match in HTML body
   -proxy    Proxy address
   -H        Headers
   -s        Show only PoC
@@ -142,7 +150,7 @@ func getRandomParams(params []string, count int) []string {
 }
 
 func testURL(base string) string {
-	if len(paramList) == 0 || paramCount <= 0 || payload == "" {
+	if len(paramList) == 0 || paramCount <= 0 || payload == "" || matchStr == "" {
 		return "ERROR"
 	}
 
@@ -175,7 +183,7 @@ func testURL(base string) string {
 	}
 
 	body, _ := ioutil.ReadAll(resp.Body)
-	if strings.Contains(string(body), payload) {
+	if strings.Contains(string(body), matchStr) {
 		if onlyPOC {
 			return u.String()
 		}
