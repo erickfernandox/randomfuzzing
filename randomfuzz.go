@@ -37,6 +37,7 @@ var (
 	onlyPOC     bool
 	paramList   []string
 	concurrency int
+	htmlOnly    bool
 )
 
 func init() {
@@ -50,6 +51,7 @@ func init() {
 	flag.StringVar(&proxy, "x", "", "Proxy URL")
 	flag.BoolVar(&onlyPOC, "only-poc", false, "Show only PoC output")
 	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output")
+	flag.BoolVar(&htmlOnly, "html", false, "Only match responses with Content-Type: text/html")
 	flag.Var(&headers, "H", "Add headers")
 	flag.Var(&headers, "headers", "Add headers")
 	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
@@ -67,10 +69,11 @@ Usage:
   -lp       List of parameters in txt file
   -params   Number of parameters to inject
   -payload  Payload to test
-  -match    String to match in HTML body
+  -match    String to match in response body
   -proxy    Proxy address
   -H        Headers
   -s        Show only PoC
+  -html     Only match if response is HTML
   -t        Number of threads (default 50, minimum 15)
   `)
 }
@@ -100,9 +103,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for target := range targets {
-				res := testURL(target)
-				if res != "ERROR" {
-					fmt.Println(res)
+				results := testBothMethods(target)
+				for _, res := range results {
+					if res != "ERROR" {
+						fmt.Println(res)
+					}
 				}
 			}
 		}()
@@ -149,51 +154,90 @@ func getRandomParams(params []string, count int) []string {
 	return r[:count]
 }
 
-func testURL(base string) string {
+func testBothMethods(base string) []string {
 	if len(paramList) == 0 || paramCount <= 0 || payload == "" || matchStr == "" {
-		return "ERROR"
+		return []string{"ERROR"}
 	}
 
-	u, err := url.Parse(base)
+	selectedParams := getRandomParams(paramList, paramCount)
+	client := buildClient()
+	var results []string
+
+	// GET
+	getURL, err := url.Parse(base)
 	if err != nil {
-		return "ERROR"
+		return []string{"ERROR"}
 	}
-
 	q := url.Values{}
-	for _, p := range getRandomParams(paramList, paramCount) {
+	for _, p := range selectedParams {
 		q.Set(p, payload)
 	}
-	u.RawQuery = q.Encode()
+	getURL.RawQuery = q.Encode()
 
-	client := buildClient()
-	req, err := http.NewRequest("GET", u.String(), nil)
+	getReq, err := http.NewRequest("GET", getURL.String(), nil)
 	if err != nil {
-		return "ERROR"
+		return []string{"ERROR"}
 	}
-	applyHeaders(req)
+	applyHeaders(getReq)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "ERROR"
-	}
-	defer resp.Body.Close()
+	getResp, err := client.Do(getReq)
+	if err == nil {
+		defer getResp.Body.Close()
+		body, _ := ioutil.ReadAll(getResp.Body)
 
-	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
-		return "ERROR"
-	}
-
-	body, _ := ioutil.ReadAll(resp.Body)
-	if strings.Contains(string(body), matchStr) {
-		if onlyPOC {
-			return u.String()
+		if !htmlOnly || strings.Contains(getResp.Header.Get("Content-Type"), "text/html") {
+			if strings.Contains(string(body), matchStr) {
+				if onlyPOC {
+					results = append(results, getURL.String())
+				} else {
+					results = append(results, "\033[1;31mGET Vulnerable - "+getURL.String()+"\033[0;0m")
+				}
+			} else if !onlyPOC {
+				results = append(results, "\033[1;30mGET Not Vulnerable - "+getURL.String()+"\033[0;0m")
+			}
 		}
-		return "\033[1;31mVulnerable - " + u.String() + "\033[0;0m"
 	}
 
-	if onlyPOC {
-		return "ERROR"
+	// POST
+	postURL, err := url.Parse(base)
+	if err != nil {
+		return results
 	}
-	return "\033[1;30mNot Vulnerable - " + u.String() + "\033[0;0m"
+	postData := url.Values{}
+	for _, p := range selectedParams {
+		postData.Set(p, payload)
+	}
+
+	postReq, err := http.NewRequest("POST", postURL.String(), strings.NewReader(postData.Encode()))
+	if err != nil {
+		return results
+	}
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	applyHeaders(postReq)
+
+	postResp, err := client.Do(postReq)
+	if err == nil {
+		defer postResp.Body.Close()
+		body, _ := ioutil.ReadAll(postResp.Body)
+
+		if !htmlOnly || strings.Contains(postResp.Header.Get("Content-Type"), "text/html") {
+			if strings.Contains(string(body), matchStr) {
+				if onlyPOC {
+					results = append(results, postURL.String())
+				} else {
+					results = append(results,
+						fmt.Sprintf("\033[1;31mPOST Vulnerable - %s [?%s]\033[0;0m",
+							postURL.String(), postData.Encode()))
+				}
+			} else if !onlyPOC {
+				results = append(results,
+					fmt.Sprintf("\033[1;30mPOST Not Vulnerable - %s [?%s]\033[0;0m",
+						postURL.String(), postData.Encode()))
+			}
+		}
+	}
+
+	return results
 }
 
 func buildClient() *http.Client {
