@@ -28,20 +28,21 @@ func (h *customheaders) Set(val string) error {
 }
 
 var (
-	headers     customheaders
-	paramFile   string
-	paramCount  int
-	payload     string
-	proxy       string
-	matchStr    string
-	onlyPOC     bool
-	paramList   []string
-	concurrency int
-	htmlOnly    bool
+	headers       customheaders
+	paramFile     string
+	paramCount    int
+	payload       string
+	proxy         string
+	matchStr      string
+	onlyPOC       bool
+	paramList     []string
+	concurrency   int
+	htmlOnly      bool
+	clusterRepeat int
 )
 
 func init() {
-	flag.IntVar(&paramCount, "params", 0, "Number of parameters to use")
+	flag.IntVar(&paramCount, "params", 0, "Number of parameters to inject")
 	flag.StringVar(&paramFile, "lp", "", "Path to parameter list file")
 	flag.StringVar(&payload, "payload", "", "Payload to inject")
 	flag.StringVar(&payload, "p", "", "Payload to inject")
@@ -52,18 +53,15 @@ func init() {
 	flag.BoolVar(&onlyPOC, "only-poc", false, "Show only PoC output")
 	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output")
 	flag.BoolVar(&htmlOnly, "html", false, "Only match responses with Content-Type: text/html")
+	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
+	flag.IntVar(&clusterRepeat, "q", 1, "Number of clusters to test per URL")
 	flag.Var(&headers, "H", "Add headers")
 	flag.Var(&headers, "headers", "Add headers")
-	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
 	flag.Usage = usage
 }
 
 func usage() {
 	fmt.Println(`
- _____ _     _
-|  _  |_|___|_|_ _ ___ ___
-|     | |  _| |_'_|_ -|_ -|
-|__|__|_|_| |_|_,_|___|___|
 
 Usage:
   -lp       List of parameters in txt file
@@ -75,7 +73,8 @@ Usage:
   -s        Show only PoC
   -html     Only match if response is HTML
   -t        Number of threads (default 50, minimum 15)
-  `)
+  -q        Number of random clusters per URL
+`)
 }
 
 func main() {
@@ -103,7 +102,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for target := range targets {
-				results := testBothMethods(target)
+				results := testMultipleClusters(target, clusterRepeat)
 				for _, res := range results {
 					if res != "ERROR" {
 						fmt.Println(res)
@@ -154,12 +153,21 @@ func getRandomParams(params []string, count int) []string {
 	return r[:count]
 }
 
-func testBothMethods(base string) []string {
-	if len(paramList) == 0 || paramCount <= 0 || payload == "" || matchStr == "" {
+func testMultipleClusters(base string, repeat int) []string {
+	var allResults []string
+	for i := 0; i < repeat; i++ {
+		selectedParams := getRandomParams(paramList, paramCount)
+		res := testMethodsWithParams(base, selectedParams)
+		allResults = append(allResults, res...)
+	}
+	return allResults
+}
+
+func testMethodsWithParams(base string, selectedParams []string) []string {
+	if len(selectedParams) == 0 || payload == "" || matchStr == "" {
 		return []string{"ERROR"}
 	}
 
-	selectedParams := getRandomParams(paramList, paramCount)
 	client := buildClient()
 	var results []string
 
