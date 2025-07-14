@@ -162,7 +162,7 @@ func testWithRod(base string, selectedParams []string) []string {
 		// browser is now passed as argument; removed per-instance setup
 		page, err := browser.Page(proto.TargetCreateTarget{URL: targetURL})
 		if err != nil {
-			return []string{"HEADLESS NAVIGATION ERROR - " + targetURL}
+			return []string{"Not HEADLESS NAVIGATION- " + targetURL}
 		}
 		defer page.Close()
 
