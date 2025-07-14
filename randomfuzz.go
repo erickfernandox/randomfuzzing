@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -14,18 +15,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chromedp/chromedp"
 )
 
 type customheaders []string
 
-func (h *customheaders) String() string {
-	return "Custom headers"
-}
-
-func (h *customheaders) Set(val string) error {
-	*h = append(*h, val)
-	return nil
-}
+func (h *customheaders) String() string       { return "Custom headers" }
+func (h *customheaders) Set(val string) error { *h = append(*h, val); return nil }
 
 var (
 	headers       customheaders
@@ -39,13 +36,14 @@ var (
 	concurrency   int
 	htmlOnly      bool
 	clusterRepeat int
+	useHeadless   bool
 )
 
 func init() {
 	flag.IntVar(&paramCount, "params", 0, "Number of parameters to inject")
 	flag.StringVar(&paramFile, "lp", "", "Path to parameter list file")
-	flag.StringVar(&payload, "payload", "", "Payload to inject")
-	flag.StringVar(&payload, "p", "", "Payload to inject")
+	flag.StringVar(&payload, "payload", "", "Payload to test")
+	flag.StringVar(&payload, "p", "", "Payload to test")
 	flag.StringVar(&matchStr, "match", "", "String to match in response body")
 	flag.StringVar(&matchStr, "m", "", "String to match in response body")
 	flag.StringVar(&proxy, "proxy", "", "Proxy URL")
@@ -55,31 +53,17 @@ func init() {
 	flag.BoolVar(&htmlOnly, "html", false, "Only match responses with Content-Type: text/html")
 	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
 	flag.IntVar(&clusterRepeat, "q", 1, "Number of clusters to test per URL")
+	flag.BoolVar(&useHeadless, "headless", false, "Use headless Chrome to verify DOM reflection")
 	flag.Var(&headers, "H", "Add headers")
-	flag.Var(&headers, "headers", "Add headers")
 	flag.Usage = usage
 }
 
 func usage() {
-	fmt.Println(`
-
-Usage:
-  -lp       List of parameters in txt file
-  -params   Number of parameters to inject
-  -payload  Payload to test
-  -match    String to match in response body
-  -proxy    Proxy address
-  -H        Headers
-  -s        Show only PoC
-  -html     Only match if response is HTML
-  -t        Number of threads (default 50, minimum 15)
-  -q        Number of random clusters per URL
-`)
+	fmt.Println("Usage: fuzz -lp params.txt -params 5 -payload \"<script>alert(1)</script>\" -m \"<script>\" -q 3 -headless")
 }
 
 func main() {
 	flag.Parse()
-
 	if concurrency < 15 {
 		concurrency = 15
 	}
@@ -171,7 +155,6 @@ func testMethodsWithParams(base string, selectedParams []string) []string {
 	client := buildClient()
 	var results []string
 
-	// GET
 	getURL, err := url.Parse(base)
 	if err != nil {
 		return []string{"ERROR"}
@@ -182,70 +165,47 @@ func testMethodsWithParams(base string, selectedParams []string) []string {
 	}
 	getURL.RawQuery = q.Encode()
 
-	getReq, err := http.NewRequest("GET", getURL.String(), nil)
-	if err != nil {
-		return []string{"ERROR"}
-	}
-	applyHeaders(getReq)
-
-	getResp, err := client.Do(getReq)
-	if err == nil {
-		defer getResp.Body.Close()
-		body, _ := ioutil.ReadAll(getResp.Body)
-
-		if !htmlOnly || strings.Contains(getResp.Header.Get("Content-Type"), "text/html") {
-			if strings.Contains(string(body), matchStr) {
-				if onlyPOC {
-					results = append(results, getURL.String())
-				} else {
+	if useHeadless {
+		found, err := runHeadlessCheck(getURL.String(), matchStr)
+		if err == nil && found {
+			results = append(results, "\033[1;31mHEADLESS GET XSS - "+getURL.String()+"\033[0;0m")
+		}
+	} else {
+		req, _ := http.NewRequest("GET", getURL.String(), nil)
+		applyHeaders(req)
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			body, _ := ioutil.ReadAll(resp.Body)
+			if !htmlOnly || strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+				if strings.Contains(string(body), matchStr) {
 					results = append(results, "\033[1;31mGET Vulnerable - "+getURL.String()+"\033[0;0m")
 				}
-			} else if !onlyPOC {
-				results = append(results, "\033[1;30mGET Not Vulnerable - "+getURL.String()+"\033[0;0m")
-			}
-		}
-	}
-
-	// POST
-	postURL, err := url.Parse(base)
-	if err != nil {
-		return results
-	}
-	postData := url.Values{}
-	for _, p := range selectedParams {
-		postData.Set(p, payload)
-	}
-
-	postReq, err := http.NewRequest("POST", postURL.String(), strings.NewReader(postData.Encode()))
-	if err != nil {
-		return results
-	}
-	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	applyHeaders(postReq)
-
-	postResp, err := client.Do(postReq)
-	if err == nil {
-		defer postResp.Body.Close()
-		body, _ := ioutil.ReadAll(postResp.Body)
-
-		if !htmlOnly || strings.Contains(postResp.Header.Get("Content-Type"), "text/html") {
-			if strings.Contains(string(body), matchStr) {
-				if onlyPOC {
-					results = append(results, postURL.String())
-				} else {
-					results = append(results,
-						fmt.Sprintf("\033[1;31mPOST Vulnerable - %s [?%s]\033[0;0m",
-							postURL.String(), postData.Encode()))
-				}
-			} else if !onlyPOC {
-				results = append(results,
-					fmt.Sprintf("\033[1;30mPOST Not Vulnerable - %s [?%s]\033[0;0m",
-						postURL.String(), postData.Encode()))
 			}
 		}
 	}
 
 	return results
+}
+
+func runHeadlessCheck(targetURL, match string) (bool, error) {
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	var htmlContent string
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(targetURL),
+		chromedp.Sleep(2*time.Second),
+		chromedp.OuterHTML("html", &htmlContent),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return strings.Contains(htmlContent, match), nil
 }
 
 func buildClient() *http.Client {
@@ -258,10 +218,7 @@ func buildClient() *http.Client {
 			transport.Proxy = http.ProxyURL(parsedProxy)
 		}
 	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   6 * time.Second,
-	}
+	return &http.Client{Transport: transport, Timeout: 6 * time.Second}
 }
 
 func applyHeaders(req *http.Request) {
