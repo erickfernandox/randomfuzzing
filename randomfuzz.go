@@ -162,11 +162,14 @@ func testWithRod(base string, selectedParams []string) []string {
 		// browser is now passed as argument; removed per-instance setup
 		page, err := browser.Page(proto.TargetCreateTarget{URL: targetURL})
 		if err != nil {
-			return []string{"Not HEADLESS NAVIGATION- " + targetURL}
+			return []string{"HEADLESS NAVIGATION ERROR - " + targetURL}
 		}
 		defer page.Close()
 
-		page.MustWaitLoad()
+		err = page.WaitLoad()
+		if err != nil {
+			return []string{"HEADLESS LOAD ERROR - " + targetURL}
+		}
 		html, err := page.HTML()
 		if err == nil && strings.Contains(html, matchStr) {
 			return []string{"\033[1;31mVulnerable - " + targetURL + "\033[0;0m"}
