@@ -80,6 +80,8 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// moved browser creation to inside goroutine for thread isolation
+
 			for target := range targets {
 				results := testMultipleClusters(target, clusterRepeat)
 				for _, res := range results {
@@ -156,6 +158,8 @@ func testWithRod(base string, selectedParams []string) []string {
 	if useHeadless {
 		launcher := launcher.New().NoSandbox(true).MustLaunch()
 		browser := rod.New().ControlURL(launcher).MustConnect().MustIgnoreCertErrors(true)
+		defer browser.Close()
+		// browser is now passed as argument; removed per-instance setup
 		page, err := browser.Page(proto.TargetCreateTarget{URL: targetURL})
 		if err != nil {
 			return []string{"HEADLESS NAVIGATION ERROR - " + targetURL}
