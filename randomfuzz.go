@@ -2,21 +2,19 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/chromedp/chromedp"
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 type customheaders []string
@@ -29,7 +27,6 @@ var (
 	paramFile     string
 	paramCount    int
 	payload       string
-	proxy         string
 	matchStr      string
 	onlyPOC       bool
 	paramList     []string
@@ -46,8 +43,6 @@ func init() {
 	flag.StringVar(&payload, "p", "", "Payload to test")
 	flag.StringVar(&matchStr, "match", "", "String to match in response body")
 	flag.StringVar(&matchStr, "m", "", "String to match in response body")
-	flag.StringVar(&proxy, "proxy", "", "Proxy URL")
-	flag.StringVar(&proxy, "x", "", "Proxy URL")
 	flag.BoolVar(&onlyPOC, "only-poc", false, "Show only PoC output")
 	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output")
 	flag.BoolVar(&htmlOnly, "html", false, "Only match responses with Content-Type: text/html")
@@ -141,92 +136,50 @@ func testMultipleClusters(base string, repeat int) []string {
 	var allResults []string
 	for i := 0; i < repeat; i++ {
 		selectedParams := getRandomParams(paramList, paramCount)
-		res := testMethodsWithParams(base, selectedParams)
+		res := testWithRod(base, selectedParams)
 		allResults = append(allResults, res...)
 	}
 	return allResults
 }
 
-func testMethodsWithParams(base string, selectedParams []string) []string {
+func testWithRod(base string, selectedParams []string) []string {
 	if len(selectedParams) == 0 || payload == "" || matchStr == "" {
 		return []string{"ERROR"}
 	}
 
-	client := buildClient()
-	var results []string
-
-	getURL, err := url.Parse(base)
-	if err != nil {
-		return []string{"ERROR"}
-	}
 	q := url.Values{}
 	for _, p := range selectedParams {
 		q.Set(p, payload)
 	}
-	getURL.RawQuery = q.Encode()
 
+	targetURL := base + "?" + q.Encode()
 	if useHeadless {
-		found, err := runHeadlessCheck(getURL.String(), matchStr)
-		if err == nil && found {
-			results = append(results, "\033[1;31mHEADLESS GET XSS - "+getURL.String()+"\033[0;0m")
+		launcher := launcher.New().NoSandbox(true).MustLaunch()
+		browser := rod.New().ControlURL(launcher).MustConnect().MustIgnoreCertErrors(true)
+		page, err := browser.Page(proto.TargetCreateTarget{URL: targetURL})
+		if err != nil {
+			return []string{"HEADLESS NAVIGATION ERROR - " + targetURL}
 		}
+		defer page.Close()
+
+		page.MustWaitLoad()
+		html, err := page.HTML()
+		if err == nil && strings.Contains(html, matchStr) {
+			return []string{"\033[1;31mVulnerable - " + targetURL + "\033[0;0m"}
+		}
+		return []string{"Not Vulnerable - " + targetURL}
 	} else {
-		req, _ := http.NewRequest("GET", getURL.String(), nil)
-		applyHeaders(req)
-		resp, err := client.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			body, _ := ioutil.ReadAll(resp.Body)
-			if !htmlOnly || strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
-				if strings.Contains(string(body), matchStr) {
-					results = append(results, "\033[1;31mGET Vulnerable - "+getURL.String()+"\033[0;0m")
-				}
+		resp, err := http.Get(targetURL)
+		if err != nil {
+			return []string{"ERROR"}
+		}
+		defer resp.Body.Close()
+		body, _ := ioutil.ReadAll(resp.Body)
+		if !htmlOnly || strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+			if strings.Contains(string(body), matchStr) {
+				return []string{"\033[1;31mVulnerable - " + targetURL + "\033[0;0m"}
 			}
 		}
-	}
-
-	return results
-}
-
-func runHeadlessCheck(targetURL, match string) (bool, error) {
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	var htmlContent string
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(targetURL),
-		chromedp.Sleep(2*time.Second),
-		chromedp.OuterHTML("html", &htmlContent),
-	)
-	if err != nil {
-		return false, err
-	}
-
-	return strings.Contains(htmlContent, match), nil
-}
-
-func buildClient() *http.Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		DialContext:     (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
-	}
-	if proxy != "" {
-		if parsedProxy, err := url.Parse(proxy); err == nil {
-			transport.Proxy = http.ProxyURL(parsedProxy)
-		}
-	}
-	return &http.Client{Transport: transport, Timeout: 6 * time.Second}
-}
-
-func applyHeaders(req *http.Request) {
-	req.Header.Set("Connection", "close")
-	for _, h := range headers {
-		parts := strings.SplitN(h, ":", 2)
-		if len(parts) == 2 {
-			req.Header.Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
-		}
+		return []string{"Not Vulnerable - " + targetURL}
 	}
 }
