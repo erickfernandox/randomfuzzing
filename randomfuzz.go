@@ -38,23 +38,25 @@ var (
 	paramList   []string
 	concurrency int
 	htmlOnly    bool
+	methodMode  string // new: -o get|post
 )
 
 func init() {
 	flag.IntVar(&paramCount, "params", 0, "Number of parameters to use")
 	flag.StringVar(&paramFile, "lp", "", "Path to parameter list file")
 	flag.StringVar(&payload, "payload", "", "Payload to inject")
-	flag.StringVar(&payload, "p", "", "Payload to inject")
+	flag.StringVar(&payload, "p", "", "Payload to inject (shorthand)")
 	flag.StringVar(&matchStr, "match", "", "String to match in response body")
-	flag.StringVar(&matchStr, "m", "", "String to match in response body")
+	flag.StringVar(&matchStr, "m", "", "String to match in response body (shorthand)")
 	flag.StringVar(&proxy, "proxy", "", "Proxy URL")
-	flag.StringVar(&proxy, "x", "", "Proxy URL")
+	flag.StringVar(&proxy, "x", "", "Proxy URL (shorthand)")
 	flag.BoolVar(&onlyPOC, "only-poc", false, "Show only PoC output")
-	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output")
+	flag.BoolVar(&onlyPOC, "s", false, "Show only PoC output (shorthand)")
 	flag.BoolVar(&htmlOnly, "html", false, "Only match responses with Content-Type: text/html")
 	flag.Var(&headers, "H", "Add headers")
 	flag.Var(&headers, "headers", "Add headers")
 	flag.IntVar(&concurrency, "t", 50, "Number of concurrent threads (min 15)")
+	flag.StringVar(&methodMode, "o", "", "Only run one method: get | post (default: both)")
 	flag.Usage = usage
 }
 
@@ -68,21 +70,33 @@ func usage() {
 Usage:
   -lp       List of parameters in txt file
   -params   Number of parameters to inject
-  -payload  Payload to test
-  -match    String to match in response body
-  -proxy    Proxy address
+  -payload  Payload to test (or -p)
+  -match    String to match in response body (or -m)
+  -proxy    Proxy address (or -x)
   -H        Headers
   -s        Show only PoC
   -html     Only match if response is HTML
   -t        Number of threads (default 50, minimum 15)
+  -o        Only method: get | post (if omitted, tests both)
   `)
 }
 
 func main() {
 	flag.Parse()
 
+	// validate concurrency minimum
 	if concurrency < 15 {
 		concurrency = 15
+	}
+
+	// validate methodMode if provided
+	if methodMode != "" {
+		m := strings.ToLower(methodMode)
+		if m != "get" && m != "post" {
+			fmt.Fprintln(os.Stderr, "Invalid -o value. Use 'get' or 'post'.")
+			os.Exit(1)
+		}
+		methodMode = m
 	}
 
 	if paramFile != "" {
@@ -103,7 +117,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for target := range targets {
-				results := testBothMethods(target)
+				results := testMethods(target, methodMode)
 				for _, res := range results {
 					if res != "ERROR" {
 						fmt.Println(res)
@@ -115,10 +129,13 @@ func main() {
 
 	visited := make(map[string]bool)
 	for stdin.Scan() {
-		url := stdin.Text()
-		if !visited[url] {
-			targets <- url
-			visited[url] = true
+		u := strings.TrimSpace(stdin.Text())
+		if u == "" {
+			continue
+		}
+		if !visited[u] {
+			targets <- u
+			visited[u] = true
 		}
 	}
 
@@ -154,7 +171,11 @@ func getRandomParams(params []string, count int) []string {
 	return r[:count]
 }
 
-func testBothMethods(base string) []string {
+// testMethods executes GET and/or POST depending on methodMode:
+// methodMode == "get"  -> only GET
+// methodMode == "post" -> only POST
+// methodMode == ""     -> both
+func testMethods(base string, methodMode string) []string {
 	if len(paramList) == 0 || paramCount <= 0 || payload == "" || matchStr == "" {
 		return []string{"ERROR"}
 	}
@@ -163,76 +184,80 @@ func testBothMethods(base string) []string {
 	client := buildClient()
 	var results []string
 
-	// GET
-	getURL, err := url.Parse(base)
-	if err != nil {
-		return []string{"ERROR"}
-	}
-	q := url.Values{}
-	for _, p := range selectedParams {
-		q.Set(p, payload)
-	}
-	getURL.RawQuery = q.Encode()
+	// If methodMode allows GET
+	if methodMode == "" || methodMode == "get" {
+		getURL, err := url.Parse(base)
+		if err != nil {
+			// if parsing fails, skip GET but continue with POST if applicable
+		} else {
+			q := url.Values{}
+			for _, p := range selectedParams {
+				q.Set(p, payload)
+			}
+			getURL.RawQuery = q.Encode()
 
-	getReq, err := http.NewRequest("GET", getURL.String(), nil)
-	if err != nil {
-		return []string{"ERROR"}
-	}
-	applyHeaders(getReq)
+			getReq, err := http.NewRequest("GET", getURL.String(), nil)
+			if err == nil {
+				applyHeaders(getReq)
 
-	getResp, err := client.Do(getReq)
-	if err == nil {
-		defer getResp.Body.Close()
-		body, _ := ioutil.ReadAll(getResp.Body)
+				getResp, err := client.Do(getReq)
+				if err == nil {
+					defer getResp.Body.Close()
+					body, _ := ioutil.ReadAll(getResp.Body)
 
-		if !htmlOnly || strings.Contains(getResp.Header.Get("Content-Type"), "text/html") {
-			if strings.Contains(string(body), matchStr) {
-				if onlyPOC {
-					results = append(results, getURL.String())
-				} else {
-					results = append(results, "\033[1;31mGET Vulnerable - "+getURL.String()+"\033[0;0m")
+					if !htmlOnly || strings.Contains(getResp.Header.Get("Content-Type"), "text/html") {
+						if strings.Contains(string(body), matchStr) {
+							if onlyPOC {
+								results = append(results, getURL.String())
+							} else {
+								results = append(results, "\033[1;31mGET Vulnerable - "+getURL.String()+"\033[0;0m")
+							}
+						} else if !onlyPOC {
+							results = append(results, "\033[1;30mGET Not Vulnerable - "+getURL.String()+"\033[0;0m")
+						}
+					}
 				}
-			} else if !onlyPOC {
-				results = append(results, "\033[1;30mGET Not Vulnerable - "+getURL.String()+"\033[0;0m")
 			}
 		}
 	}
 
-	// POST
-	postURL, err := url.Parse(base)
-	if err != nil {
-		return results
-	}
-	postData := url.Values{}
-	for _, p := range selectedParams {
-		postData.Set(p, payload)
-	}
+	// If methodMode allows POST
+	if methodMode == "" || methodMode == "post" {
+		postURL, err := url.Parse(base)
+		if err != nil {
+			// if parsing fails and we already returned results for GET, just return them
+			return results
+		}
+		postData := url.Values{}
+		for _, p := range selectedParams {
+			postData.Set(p, payload)
+		}
 
-	postReq, err := http.NewRequest("POST", postURL.String(), strings.NewReader(postData.Encode()))
-	if err != nil {
-		return results
-	}
-	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	applyHeaders(postReq)
+		postReq, err := http.NewRequest("POST", postURL.String(), strings.NewReader(postData.Encode()))
+		if err == nil {
+			postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			applyHeaders(postReq)
 
-	postResp, err := client.Do(postReq)
-	if err == nil {
-		defer postResp.Body.Close()
-		body, _ := ioutil.ReadAll(postResp.Body)
+			postResp, err := client.Do(postReq)
+			if err == nil {
+				defer postResp.Body.Close()
+				body, _ := ioutil.ReadAll(postResp.Body)
 
-		if !htmlOnly || strings.Contains(postResp.Header.Get("Content-Type"), "text/html") {
-			if strings.Contains(string(body), matchStr) {
-				if onlyPOC {
-					results = append(results, postURL.String())
-				} else {
-					results = append(results,
-						fmt.Sprintf("\033[1;31mPOST Vulnerable - %s [?%s]\033[0;0m",
-							postURL.String(), postData.Encode()))
+				if !htmlOnly || strings.Contains(postResp.Header.Get("Content-Type"), "text/html") {
+					if strings.Contains(string(body), matchStr) {
+						if onlyPOC {
+							results = append(results, postURL.String())
+						} else {
+							results = append(results,
+								fmt.Sprintf("\033[1;31mPOST Vulnerable - %s [?%s]\033[0;0m",
+									postURL.String(), postData.Encode()))
+						}
+					} else if !onlyPOC {
+						results = append(results,
+							fmt.Sprintf("\033[1;30mPOST Not Vulnerable - %s [?%s]\033[0;0m",
+								postURL.String(), postData.Encode()))
+					}
 				}
-			} else if !onlyPOC {
-				results = append(results,
-					fmt.Sprintf("\033[1;30mPOST Not Vulnerable - %s [?%s]\033[0;0m",
-						postURL.String(), postData.Encode()))
 			}
 		}
 	}
